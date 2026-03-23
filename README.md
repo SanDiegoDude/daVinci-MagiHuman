@@ -1,3 +1,8 @@
+![cover](assets/cover.png)
+
+
+-----
+
 <div align="center">
 
 # daVinci-MagiHuman
