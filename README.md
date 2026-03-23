@@ -92,7 +92,7 @@ Key design choices:
 
 - **Latent-Space Super-Resolution** — Two-stage pipeline: generate at low resolution, then refine in latent space (not pixel space), avoiding an extra VAE decode-encode round trip.
 - **Turbo VAE Decoder** — A lightweight re-trained decoder that substantially reduces decoding overhead.
-- **Full-Graph Compilation** — [MagiCompiler](https://github.com/sandai/MagiCompiler) fuses operators across Transformer layers for ~1.2x speedup.
+- **Full-Graph Compilation** — [MagiCompiler](https://github.com/SandAI-org/MagiCompiler) fuses operators across Transformer layers for ~1.2x speedup.
 - **Distillation** — DMD-2 distillation enables generation with only 8 denoising steps (no CFG), without sacrificing quality.
 
 ## Getting Started
@@ -104,14 +104,13 @@ Key design choices:
 docker pull sandai/magi-compiler:latest
 
 # Launch container
-docker run -it --gpus all \
-  -v /path/to/models:/models \
-  sandai/magi-compiler:latest bash
+docker run -it --gpus all -v /path/to/models:/models sandai/magi-compiler:latest bash
 
 # Install MagiCompiler
-git clone https://github.com/sandai/MagiCompiler
+git clone https://github.com/SandAI-org/MagiCompiler.git
 cd MagiCompiler
-pip install -e . --no-build-isolation --config-settings editable_mode=compat
+pip install -r requirements.txt
+pip install .
 cd ..
 
 # Clone daVinci-MagiHuman
@@ -134,9 +133,10 @@ git clone https://github.com/Dao-AILab/flash-attention
 cd flash-attention/hopper && python setup.py install && cd ../..
 
 # Install MagiCompiler
-git clone https://github.com/sandai/MagiCompiler
+git clone https://github.com/SandAI-org/MagiCompiler.git
 cd MagiCompiler
-pip install -e . --no-build-isolation --config-settings editable_mode=compat
+pip install -r requirements.txt
+pip install .
 cd ..
 
 # Clone and install daVinci-MagiHuman
