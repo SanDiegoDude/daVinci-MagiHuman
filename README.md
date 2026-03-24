@@ -85,7 +85,7 @@ Key design choices:
 | vs Ovi 1.1 | **80.0%** | 8.2% | 11.8% |
 | vs LTX 2.3 | **60.9%** | 17.2% | 21.9% |
 
-### Inference Speed (5-second video)
+### Inference Speed (5-second video, on a single H100 GPU)
 
 | Resolution | Base (s) | Super-Res (s) | Decode (s) | **Total (s)** |
 |---|:---:|:---:|:---:|:---:|
@@ -154,9 +154,19 @@ pip install -r requirements.txt
 
 Download the complete model stack from [HuggingFace](https://huggingface.co/GAIR/daVinci-MagiHuman) and update the paths in the config files under `example/`.
 
+You will also need the following external models:
+
+| Model | Source |
+|---|---|
+| Text Encoder | [t5gemma-9b-9b-ul2](https://huggingface.co/google/t5gemma-9b-9b-ul2) |
+| Audio Model | [stable-audio-open-1.0](https://huggingface.co/stabilityai/stable-audio-open-1.0) |
+| VAE | [Wan2.2-TI2V-5B](https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B) |
+
 ## 🎯 Usage
 
 Before running, update the checkpoint paths in the config files (`example/*/config.json`) to point to your local model directory.
+
+> **Note:** The first run will be slower due to model compilation and cache warmup. Subsequent runs will match the reported inference speeds.
 
 **Base Model (256p)**
 ```bash
