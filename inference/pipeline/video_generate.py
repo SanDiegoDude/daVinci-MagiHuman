@@ -310,6 +310,10 @@ class MagiEvaluator:
         if env_is_true("CPU_OFFLOAD") and env_is_true("SR2_1080"):
             self.model = self.model.to(torch.device("cpu"))
 
+        if getattr(self, '_capture_br_latent', False):
+            self._br_latent_video = br_latent_video.clone()
+            self._br_latent_audio = br_latent_audio.clone()
+
         if sr_width is not None and sr_height is not None and self.sr_model is not None:
             event_path_timer().synced_record("Step4: Encode Image for Super Resolution")
             sr_latent_height = sr_height // self.vae_stride[1] // self.patch_size[1] * self.patch_size[1]
@@ -472,6 +476,10 @@ class MagiEvaluator:
                 cfg_number,
                 use_sr_model,
             )
+
+            cb = getattr(self, '_step_callback', None)
+            if cb is not None:
+                cb(idx + 1, len(timesteps), use_sr_model)
 
         print_rank_0(f"latent_video: {latent_video.shape}, latent_audio: {latent_audio.shape}")
         if latent_image is not None:

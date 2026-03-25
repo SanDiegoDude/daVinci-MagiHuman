@@ -47,3 +47,8 @@ tags
 fx_graph*.pdf
 /clean_repo.py
 /rm_caches.sh
+
+# Custom additions
+.env
+*.wav
+output/

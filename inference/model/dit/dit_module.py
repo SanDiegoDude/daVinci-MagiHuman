@@ -297,22 +297,89 @@ class _BF16ComputeLinear(torch.autograd.Function):
         output_dtype: Optional[torch.dtype],
         compute_dtype: torch.dtype = torch.bfloat16,
     ):
-        # Convert input to specified input data type
         input_cast = input.to(compute_dtype)
-        # Convert weight to computation data type
         weight_cast = weight.to(compute_dtype)
-        # Perform linear operation
         output = torch.matmul(input_cast, weight_cast.t())
 
-        # Add bias if present
         if bias is not None:
             bias_cast = bias.to(compute_dtype)
             output = output + bias_cast
-        else:
-            bias_cast = None
 
-        # Convert output to specified output data type
         return output.to(output_dtype)
+
+
+_FP8_MAX = torch.finfo(torch.float8_e4m3fn).max
+
+
+# ---------------------------------------------------------------------------
+# Custom op: entire FP8 linear layer — opaque to torch.compile / Inductor.
+# Encapsulates dynamic input quantization, 16-aligned padding, _scaled_mm,
+# and bias so no FP8 constants (like 448.0) leak into the compiled graph.
+# ---------------------------------------------------------------------------
+
+@torch.library.custom_op("magi::fp8_linear", mutates_args=())
+def _fp8_linear_op(
+    input: torch.Tensor,
+    weight_fp8: torch.Tensor,
+    weight_scale: torch.Tensor,
+    bias: torch.Tensor,
+    has_bias: bool,
+) -> torch.Tensor:
+    original_shape = input.shape
+    input_2d = input.reshape(-1, input.shape[-1])
+
+    fp8_max = torch.finfo(torch.float8_e4m3fn).max
+    amax = input_2d.abs().amax().clamp(min=1e-12)
+    input_scale = (amax / fp8_max).float()
+    input_fp8 = (input_2d.float() / input_scale).clamp(-fp8_max, fp8_max).to(torch.float8_e4m3fn)
+
+    N = weight_fp8.shape[0]
+    K = weight_fp8.shape[1]
+    w = weight_fp8
+    inp = input_fp8
+
+    K_rem = K % 16
+    N_rem = N % 16
+    if K_rem:
+        kp = 16 - K_rem
+        inp = torch.nn.functional.pad(inp, (0, kp))
+        w = torch.nn.functional.pad(w, (0, kp))
+    if N_rem:
+        w = torch.nn.functional.pad(w, (0, 0, 0, 16 - N_rem))
+
+    out = torch._scaled_mm(
+        inp, w.t(),
+        scale_a=input_scale, scale_b=weight_scale.float(),
+        out_dtype=torch.bfloat16,
+    )
+    if N_rem:
+        out = out[:, :N].contiguous()
+
+    if has_bias:
+        out = out + bias.to(out.dtype)
+
+    return out.reshape(*original_shape[:-1], out.shape[-1])
+
+
+@_fp8_linear_op.register_fake
+def _fp8_linear_fake(input, weight_fp8, weight_scale, bias, has_bias):
+    N = weight_fp8.shape[0]
+    return torch.empty(*input.shape[:-1], N, dtype=torch.bfloat16, device=input.device)
+
+
+# ---------------------------------------------------------------------------
+
+def _fp8_linear(
+    input: torch.Tensor,
+    weight_fp8: torch.Tensor,
+    weight_scale: torch.Tensor,
+    bias: Optional[torch.Tensor],
+    output_dtype: torch.dtype,
+) -> torch.Tensor:
+    """FP8 linear via custom op — fully opaque to torch.compile."""
+    dummy = bias if bias is not None else weight_scale.new_empty(0)
+    out = _fp8_linear_op(input, weight_fp8, weight_scale, dummy, bias is not None)
+    return out.to(output_dtype)
 
 
 class BaseLinear(nn.Module):
@@ -338,6 +405,11 @@ class BaseLinear(nn.Module):
             self.bias = Parameter(torch.empty(out_features * num_experts, **factory_kwargs))
         else:
             self.register_parameter("bias", None)
+        self.register_buffer("weight_scale", None)
+
+    @property
+    def is_fp8(self) -> bool:
+        return self.weight.dtype == torch.float8_e4m3fn
 
     def forward(
         self,
@@ -346,6 +418,8 @@ class BaseLinear(nn.Module):
         modality_dispatcher: Optional[ModalityDispatcher] = None,
     ) -> torch.Tensor:
         output_dtype = input.dtype if output_dtype is None else output_dtype
+        if self.is_fp8:
+            return _fp8_linear(input, self.weight, self.weight_scale, self.bias, output_dtype)
         return _BF16ComputeLinear.apply(input, self.weight, self.bias, output_dtype, torch.bfloat16)
 
 
@@ -364,14 +438,25 @@ class NativeMoELinear(BaseLinear):
         if self.bias is not None:
             bias_chunked = self.bias.chunk(self.num_experts, dim=0)
 
-        for i in range(self.num_experts):
-            input_list[i] = _BF16ComputeLinear.apply(
-                input_list[i],
-                weight_chunked[i],
-                bias_chunked[i] if self.bias is not None else None,
-                output_dtype,
-                torch.bfloat16,
-            )
+        if self.is_fp8:
+            scale_chunked = self.weight_scale.chunk(self.num_experts) if self.weight_scale.numel() > 1 else [self.weight_scale] * self.num_experts
+            for i in range(self.num_experts):
+                input_list[i] = _fp8_linear(
+                    input_list[i],
+                    weight_chunked[i],
+                    scale_chunked[i],
+                    bias_chunked[i] if self.bias is not None else None,
+                    output_dtype,
+                )
+        else:
+            for i in range(self.num_experts):
+                input_list[i] = _BF16ComputeLinear.apply(
+                    input_list[i],
+                    weight_chunked[i],
+                    bias_chunked[i] if self.bias is not None else None,
+                    output_dtype,
+                    torch.bfloat16,
+                )
         return modality_dispatcher.undispatch(*input_list)  # type: ignore
 
 

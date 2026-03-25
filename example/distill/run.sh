@@ -15,6 +15,7 @@ export WORLD_SIZE="$((GPUS_PER_NODE * NNODES))"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 export NCCL_ALGO="${NCCL_ALGO:-^NVLS}"
 export PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH:-}"
+export TRITON_PTXAS_PATH="${TRITON_PTXAS_PATH:-/usr/local/cuda/bin/ptxas}"
 
 DISTRIBUTED_ARGS="--nnodes=${NNODES} --node_rank=${NODE_RANK} --nproc_per_node=${GPUS_PER_NODE} --rdzv-backend=c10d --rdzv-endpoint=${MASTER_ADDR}:${MASTER_PORT}"
 

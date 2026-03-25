@@ -14,6 +14,7 @@
 
 import os
 import random
+import re
 from typing import Optional, Union
 
 import imageio
@@ -94,7 +95,7 @@ class MagiPipeline:
             video_np = upsample_video(video_np, output_width, output_height, upsample_mode)
 
         if torch.distributed.get_rank() == torch.distributed.get_world_size() - 1:
-            saving_name = f"{prompt.replace(' ', '_')[:10]}"
+            saving_name = re.sub(r'[^a-zA-Z0-9_]', '_', prompt.replace(' ', '_')[:10])
             audio_path = saving_name + str(random.randint(0, 1000000)) + ".wav"
             video_path = saving_name + str(random.randint(0, 1000000)) + ".mp4"
             sf.write(audio_path, audio_np, self.evaluator.audio_vae.sample_rate)
