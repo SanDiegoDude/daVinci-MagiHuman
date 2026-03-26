@@ -538,16 +538,23 @@ def init_pipeline(models_dir: str):
 
     _parsed_config = parse_config()
     model = get_dit(_parsed_config.arch_config, _parsed_config.engine_config)
+
+    if _vram.enabled:
+        print("  [vram] Moving DiT to CPU before evaluator init...")
+        model.to(torch.device("cpu"))
+        gc.collect()
+        torch.cuda.empty_cache()
+
     _pipeline = MagiPipeline(model, _parsed_config.evaluation_config)
 
     os.unlink(config_file.name)
     _install_tiled_decode()
 
     _vram.register("dit", _pipeline.model)
+    if _vram.enabled:
+        _vram._on_gpu.discard("dit")
 
     if _vram.enabled:
-        _pipeline.model.to(torch.device("cpu"))
-        _vram._on_gpu.discard("dit")
         gc.collect()
         torch.cuda.empty_cache()
         vram_total = torch.cuda.get_device_properties(0).total_memory / 1024**3
