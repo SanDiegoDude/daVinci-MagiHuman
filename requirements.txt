@@ -1,3 +1,15 @@
+# ===================================================================
+# NOTE: PyTorch must be installed FIRST with the correct CUDA version
+# for your GPU driver. Do NOT pip install this file directly — use:
+#
+#   bash install.sh
+#
+# Or manually:
+#   pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+#   pip install -r requirements.txt
+#   pip install -r requirements-nodeps.txt --no-deps
+# ===================================================================
+
 # --- Gradio frontend & utilities ---
 gradio
 httpx
