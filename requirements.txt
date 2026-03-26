@@ -22,6 +22,7 @@ einops
 safetensors
 scipy
 numpy
+numba
 magi_compiler @ git+https://github.com/SandAI-org/MagiCompiler.git
 
 # --- Original upstream deps ---
