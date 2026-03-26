@@ -1142,34 +1142,39 @@ def generate_image(
     save_prefix = os.path.join(output_dir, f"{timestamp}_{seed}")
 
     evaluator._capture_br_latent = False
+    evaluator._return_latent = True
     evaluator._step_callback = lambda step, total, is_sr: progress(
-        0.05 + (step / total) * 0.85, desc=f"{'SR' if is_sr else 'Base'} step {step}/{total}"
+        0.05 + (step / total) * 0.75, desc=f"{'SR' if is_sr else 'Base'} step {step}/{total}"
     )
 
     t0 = time.time()
     with _pipeline_lock:
-        progress(0.05, desc="Generating 1s video (will extract frame)…")
-        with _capture_stdout() as captured_buf:
-            save_path = _pipeline.run_offline(
-                prompt=prompt, image=image_input, audio=None,
-                save_path_prefix=save_prefix, seed=seed, seconds=1,
+        progress(0.05, desc="Generating (latent only, skip full decode)…")
+        with torch.random.fork_rng(devices=[torch.cuda.current_device()]):
+            torch.random.manual_seed(seed)
+            latent_video, _latent_audio = evaluator.evaluate(
+                prompt, image_input, None,
+                seconds=1,
                 br_width=br_width, br_height=br_height,
                 sr_width=sr_width, sr_height=sr_height,
+                br_num_inference_steps=base_steps,
+                sr_num_inference_steps=sr_steps if use_sr else 5,
             )
         _vram.mark_offloaded("dit")
         _vram.mark_offloaded("sr")
 
-    elapsed = time.time() - t0
+        progress(0.85, desc="Decoding single frame…")
+        trimmed = latent_video[:, :, :1, :, :]
+        with torch.inference_mode():
+            frames_np = evaluator.decode_video(trimmed)
+            frame_0 = frames_np[0][0]  # first video, first frame → (H, W, C) uint8
+
+    evaluator._return_latent = False
     evaluator._step_callback = None
-    progress(0.95, desc="Extracting frame…")
 
-    import imageio
+    elapsed = time.time() - t0
+
     from PIL import Image as PILImage
-
-    reader = imageio.get_reader(save_path)
-    frame_0 = reader.get_data(0)
-    reader.close()
-
     img_path = os.path.join(output_dir, f"{timestamp}_{seed}_img.png")
     PILImage.fromarray(frame_0).save(img_path)
 

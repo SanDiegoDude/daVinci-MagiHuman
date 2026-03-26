@@ -357,6 +357,9 @@ class MagiEvaluator:
             latent_video = br_latent_video
             latent_audio = br_latent_audio
 
+        if getattr(self, '_return_latent', False):
+            return latent_video, latent_audio
+
         event_path_timer().synced_record("Step6: Decode Video", print_fn=print_rank_last)
         result = self.post_process(latent_video, latent_audio)
         event_path_timer().synced_record("Step8: Post Process", print_fn=print_rank_last)
