@@ -19,6 +19,7 @@ huggingface-hub
 
 # --- Inference deps missing from upstream list ---
 einops
+flash-attn
 safetensors
 scipy
 numpy
