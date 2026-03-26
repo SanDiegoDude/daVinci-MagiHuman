@@ -1220,8 +1220,11 @@ def generate_image(
     if sr_width:
         lines.append(f"SR: {sr_tier} model → {sr_res_choice} ({sr_width}x{sr_height})  |  SR Steps: {sr_steps}")
     lines.append(f"Output: {os.path.basename(img_path)} ({frame_0.shape[1]}x{frame_0.shape[0]})")
+    lines.append("")
+    lines.append("── Prompt Used ──")
+    lines.append(prompt[:500] + ("..." if len(prompt) > 500 else ""))
 
-    return img_path, "\n".join(lines), seed
+    return img_path, "\n".join(lines), seed, enhanced_prompt
 
 
 # ---------------------------------------------------------------------------
@@ -2071,7 +2074,7 @@ def build_ui():
                 img_base_steps, img_vid_guidance,
                 llm_api_base, llm_api_key, llm_model, llm_vision_model,
             ],
-            outputs=[img_output, img_status, img_seed_out],
+            outputs=[img_output, img_status, img_seed_out, img_enhanced_prompt],
             concurrency_limit=1,
         )
 
