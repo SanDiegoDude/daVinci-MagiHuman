@@ -5,6 +5,12 @@ Pillow
 soundfile
 huggingface-hub
 
+# --- Inference deps missing from upstream list ---
+einops
+safetensors
+scipy
+numpy
+
 # --- Original upstream deps ---
 accelerate==1.10.1
 av==15.1.0
