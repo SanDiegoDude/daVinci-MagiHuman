@@ -141,7 +141,9 @@ SR_SHORT_SIDE = {
 
 SR_SHORT_PRESETS = {
     "540p": 512,
+    "640p": 640,
     "720p": 736,
+    "900p": 896,
     "1080p": 1088,
 }
 
@@ -843,6 +845,10 @@ def generate(
     vid_guidance: float,
     aud_guidance: float,
     preview_raw: bool = False,
+    llm_api_base: str = "",
+    llm_api_key: str = "",
+    llm_model: str = "",
+    llm_vision_model: str = "",
     progress=gr.Progress(),
 ):
     # --- Wait for pipeline if still loading ---
@@ -856,6 +862,19 @@ def generate(
         if _pipeline is None:
             msg = f"Pipeline not initialized: {_pipeline_error}" if _pipeline_error else "Pipeline not initialized. Check server logs."
             raise gr.Error(msg)
+
+    if use_enhanced and not enhanced_prompt.strip() and raw_prompt.strip():
+        progress(0.0, desc="Auto-enhancing prompt…")
+        img_for_enhance = image if mode == "Image to Video" else None
+        enhanced_prompt = enhance_prompt(
+            raw_prompt,
+            image_path=img_for_enhance,
+            progress_callback=lambda frac, msg: progress(frac * 0.03, desc=msg),
+            api_base=llm_api_base,
+            api_key=llm_api_key,
+            model=llm_model,
+            vision_model=llm_vision_model,
+        )
 
     used_enhanced = use_enhanced and bool(enhanced_prompt.strip())
     prompt = enhanced_prompt.strip() if used_enhanced else raw_prompt.strip()
@@ -1009,7 +1028,336 @@ def generate(
 
 
 # ---------------------------------------------------------------------------
-# Standalone SR upscale
+# Image generation (single-frame from video pipeline)
+# ---------------------------------------------------------------------------
+
+IMAGE_ASPECT_PRESETS = {
+    "1:1 Square": (1, 1),
+    "16:9 Landscape": (16, 9),
+    "9:16 Portrait": (9, 16),
+    "4:3 Landscape": (4, 3),
+    "3:4 Portrait": (3, 4),
+    "3:2 Landscape": (3, 2),
+    "2:3 Portrait": (2, 3),
+    "21:9 Ultrawide": (21, 9),
+}
+
+
+def _dims_from_aspect_and_mp(aspect_w: int, aspect_h: int, megapixels: float) -> tuple[int, int]:
+    """Compute width/height from aspect ratio and target megapixels, snapped to ALIGNMENT."""
+    total = megapixels * 1_000_000
+    ratio = aspect_w / aspect_h
+    h = (total / ratio) ** 0.5
+    w = h * ratio
+    return _snap(int(w)), _snap(int(h))
+
+
+def generate_image(
+    img_mode: str,
+    raw_prompt: str,
+    enhanced_prompt: str,
+    use_enhanced: bool,
+    ref_image,
+    seed: int,
+    randomize_seed: bool,
+    aspect_choice: str,
+    megapixels: float,
+    res_multiplier: float,
+    sr_model_choice: str,
+    sr_res_choice: str,
+    sr_steps: int,
+    sr_guidance: float,
+    base_steps: int,
+    vid_guidance: float,
+    llm_api_base: str = "",
+    llm_api_key: str = "",
+    llm_model: str = "",
+    llm_vision_model: str = "",
+    progress=gr.Progress(),
+):
+    """Generate a single image by running a 1-second video and extracting frame 0."""
+    if _pipeline_loading or _pipeline is None:
+        wait_start = time.time()
+        while _pipeline_loading and (time.time() - wait_start) < 600:
+            progress(0.0, desc=f"Waiting for models to load… ({int(time.time() - wait_start)}s)")
+            time.sleep(2)
+        if _pipeline is None:
+            raise gr.Error("Pipeline not initialized. Check server logs.")
+
+    if use_enhanced and not enhanced_prompt.strip() and raw_prompt.strip():
+        progress(0.0, desc="Auto-enhancing prompt…")
+        img_for_enhance = ref_image if img_mode == "Image to Image" else None
+        enhanced_prompt = enhance_prompt(
+            raw_prompt, image_path=img_for_enhance,
+            progress_callback=lambda frac, msg: progress(frac * 0.03, desc=msg),
+            api_base=llm_api_base, api_key=llm_api_key,
+            model=llm_model, vision_model=llm_vision_model,
+        )
+
+    used_enhanced = use_enhanced and bool(enhanced_prompt.strip())
+    prompt = enhanced_prompt.strip() if used_enhanced else raw_prompt.strip()
+    if not prompt:
+        raise gr.Error("Prompt is required.")
+
+    if img_mode == "Image to Image" and ref_image is None:
+        raise gr.Error("Reference image is required for Image-to-Image mode.")
+
+    if randomize_seed:
+        seed = random.randint(0, 2**31 - 1)
+
+    aspect = IMAGE_ASPECT_PRESETS.get(aspect_choice, (16, 9))
+    br_width, br_height = _dims_from_aspect_and_mp(aspect[0], aspect[1], megapixels)
+
+    if res_multiplier and res_multiplier > 1.0:
+        br_width = _snap(int(br_width * res_multiplier))
+        br_height = _snap(int(br_height * res_multiplier))
+
+    image_input = ref_image if img_mode == "Image to Image" else None
+
+    sr_model_map = {"540p model": "540p", "1080p model": "1080p"}
+    sr_tier = sr_model_map.get(sr_model_choice)
+    sr_width, sr_height = None, None
+    use_sr = sr_tier is not None
+
+    if use_sr:
+        progress(0.0, desc=f"Checking SR model ({sr_tier})...")
+        _ensure_sr_model(sr_tier)
+        target_short = SR_SHORT_PRESETS.get(sr_res_choice, 512)
+        sr_width, sr_height = _sr_dims_for(br_width, br_height, target_short)
+
+    _pipeline.evaluation_config.num_inference_steps = base_steps
+    _pipeline.evaluation_config.video_txt_guidance_scale = vid_guidance
+    _pipeline.evaluation_config.audio_txt_guidance_scale = 5.0
+    evaluator = _pipeline.evaluator
+    evaluator.video_txt_guidance_scale = vid_guidance
+    evaluator.audio_txt_guidance_scale = 5.0
+    if use_sr:
+        _pipeline.evaluation_config.sr_num_inference_steps = sr_steps
+        _pipeline.evaluation_config.sr_video_txt_guidance_scale = sr_guidance
+        evaluator.sr_video_txt_guidance_scale = sr_guidance
+
+    output_dir = os.path.join(Path(__file__).resolve().parent, "output")
+    os.makedirs(output_dir, exist_ok=True)
+    timestamp = int(time.time())
+    save_prefix = os.path.join(output_dir, f"{timestamp}_{seed}")
+
+    evaluator._capture_br_latent = False
+    evaluator._step_callback = lambda step, total, is_sr: progress(
+        0.05 + (step / total) * 0.85, desc=f"{'SR' if is_sr else 'Base'} step {step}/{total}"
+    )
+
+    t0 = time.time()
+    with _pipeline_lock:
+        progress(0.05, desc="Generating 1s video (will extract frame)…")
+        with _capture_stdout() as captured_buf:
+            save_path = _pipeline.run_offline(
+                prompt=prompt, image=image_input, audio=None,
+                save_path_prefix=save_prefix, seed=seed, seconds=1,
+                br_width=br_width, br_height=br_height,
+                sr_width=sr_width, sr_height=sr_height,
+            )
+        _vram.mark_offloaded("dit")
+        _vram.mark_offloaded("sr")
+
+    elapsed = time.time() - t0
+    evaluator._step_callback = None
+    progress(0.95, desc="Extracting frame…")
+
+    import imageio
+    from PIL import Image as PILImage
+
+    reader = imageio.get_reader(save_path)
+    frame_0 = reader.get_data(0)
+    reader.close()
+
+    img_path = os.path.join(output_dir, f"{timestamp}_{seed}_img.png")
+    PILImage.fromarray(frame_0).save(img_path)
+
+    lines = [
+        f"Total: {elapsed:.1f}s  |  Seed: {seed}",
+        f"Mode: {img_mode}  |  Base: {br_width}x{br_height}  |  Steps: {base_steps}",
+        f"Aspect: {aspect_choice}  |  Target: {megapixels} MP",
+    ]
+    if sr_width:
+        lines.append(f"SR: {sr_tier} model → {sr_res_choice} ({sr_width}x{sr_height})  |  SR Steps: {sr_steps}")
+    lines.append(f"Output: {os.path.basename(img_path)} ({frame_0.shape[1]}x{frame_0.shape[0]})")
+
+    return img_path, "\n".join(lines), seed
+
+
+# ---------------------------------------------------------------------------
+# Standalone image upscale
+# ---------------------------------------------------------------------------
+
+MIN_SR_FRAMES = 5  # temporal padding for single-image SR
+
+
+def upscale_image(
+    input_image: str,
+    prompt: str,
+    up_model_choice: str,
+    up_res_choice: str,
+    sr_steps: int,
+    sr_guidance: float,
+    seed: int,
+    randomize_seed: bool,
+    progress=gr.Progress(),
+):
+    """Upscale a single image by encoding it as a short repeated video, running SR, extracting frame 0."""
+    import numpy as np
+    from PIL import Image as PILImage
+
+    if _pipeline_loading or _pipeline is None:
+        wait_start = time.time()
+        while _pipeline_loading and (time.time() - wait_start) < 600:
+            progress(0.0, desc=f"Waiting for models… ({int(time.time() - wait_start)}s)")
+            time.sleep(2)
+        if _pipeline is None:
+            raise gr.Error("Pipeline not initialized. Check server logs.")
+
+    if not input_image:
+        raise gr.Error("Upload an image to upscale.")
+
+    sr_model_map = {"540p model": "540p", "1080p model": "1080p"}
+    sr_tier = sr_model_map.get(up_model_choice)
+    if sr_tier is None:
+        raise gr.Error("Select an SR model.")
+
+    if not prompt or not prompt.strip():
+        raise gr.Error("A text prompt is required — the SR model is text-guided.")
+
+    if randomize_seed:
+        seed = random.randint(0, 2**31 - 1)
+
+    progress(0.0, desc="Loading image…")
+    img = PILImage.open(input_image).convert("RGB")
+    img_np = np.array(img)  # (H, W, C)
+    input_h, input_w = img_np.shape[:2]
+
+    progress(0.02, desc=f"Ensuring SR model ({sr_tier})...")
+    _ensure_sr_model(sr_tier)
+
+    target_short = SR_SHORT_PRESETS.get(up_res_choice, 512)
+    sr_width, sr_height = _sr_dims_for(input_w, input_h, target_short)
+    print(f"  [sr] Image upscale: {sr_width}×{sr_height} (from {input_w}×{input_h})")
+
+    evaluator = _pipeline.evaluator
+    vae_stride = evaluator.vae_stride
+    patch_size = evaluator.patch_size
+    device = evaluator.device
+    dtype = evaluator.dtype
+
+    sr_latent_height = sr_height // vae_stride[1] // patch_size[1] * patch_size[1]
+    sr_latent_width = sr_width // vae_stride[2] // patch_size[2] * patch_size[2]
+    sr_height = sr_latent_height * vae_stride[1]
+    sr_width = sr_latent_width * vae_stride[2]
+
+    frames_np = np.stack([img_np] * MIN_SR_FRAMES, axis=0)  # (T, H, W, C)
+    video_tensor = torch.from_numpy(frames_np).permute(0, 3, 1, 2).float() / 255.0
+    video_tensor = video_tensor * 2.0 - 1.0
+    video_tensor = video_tensor.unsqueeze(0).permute(0, 2, 1, 3, 4)  # (1, C, T, H, W)
+
+    from torch.nn.functional import interpolate as F_interpolate
+
+    br_latent_h = input_h // vae_stride[1] // patch_size[1] * patch_size[1]
+    br_latent_w = input_w // vae_stride[2] // patch_size[2] * patch_size[2]
+    enc_h = br_latent_h * vae_stride[1]
+    enc_w = br_latent_w * vae_stride[2]
+
+    if enc_h != input_h or enc_w != input_w:
+        video_tensor = F_interpolate(
+            video_tensor.reshape(1, 3, MIN_SR_FRAMES, input_h, input_w),
+            size=(MIN_SR_FRAMES, enc_h, enc_w),
+            mode="trilinear", align_corners=True,
+        )
+
+    progress(0.10, desc="Encoding through VAE…")
+    video_tensor = video_tensor.to(device=device, dtype=dtype)
+
+    t0 = time.time()
+    with _pipeline_lock:
+        with torch.inference_mode():
+            br_latent_video = evaluator.vae.encode(video_tensor).to(torch.float32)
+            latent_length = br_latent_video.shape[2]
+
+            progress(0.25, desc="Interpolating latent to SR resolution…")
+            latent_video = F_interpolate(
+                br_latent_video,
+                size=(latent_length, sr_latent_height, sr_latent_width),
+                mode="trilinear", align_corners=True,
+            )
+
+            noise_value = evaluator.config.noise_value
+            if noise_value != 0:
+                noise = torch.randn_like(latent_video)
+                sigmas = evaluator.sigmas.to(latent_video.device)
+                sigma = sigmas[noise_value]
+                latent_video = latent_video * sigma + noise * (1 - sigma**2) ** 0.5
+
+            num_frames = MIN_SR_FRAMES
+            latent_audio = torch.randn(1, num_frames, 64, dtype=torch.float32, device=device)
+
+            progress(0.30, desc="Encoding text prompt…")
+            from inference.pipeline.prompt_process import get_padded_t5_gemma_embedding
+            context, original_context_len = get_padded_t5_gemma_embedding(
+                prompt, evaluator.txt_model_path, device, dtype,
+                evaluator.config.t5_gemma_target_length,
+            )
+
+            progress(0.40, desc=f"Running SR denoising ({sr_steps} steps)…")
+            _pipeline.evaluation_config.sr_num_inference_steps = sr_steps
+            _pipeline.evaluation_config.sr_video_txt_guidance_scale = sr_guidance
+            evaluator.sr_video_txt_guidance_scale = sr_guidance
+
+            _vram.ensure_on_gpu("sr")
+
+            def _on_step(step, total, is_sr):
+                progress(0.40 + (step / total) * 0.40, desc=f"SR step {step}/{total}")
+            evaluator._step_callback = _on_step
+
+            with _capture_stdout():
+                torch.random.manual_seed(seed)
+                sr_latent_video, _ = evaluator.evaluate_with_latent(
+                    context, original_context_len, None,
+                    latent_video.clone(), latent_audio.clone(),
+                    sr_steps, is_a2v=False, use_sr_model=True,
+                )
+
+            evaluator._step_callback = None
+
+            progress(0.85, desc="Decoding…")
+            videos_np = evaluator.decode_video(sr_latent_video)
+            video_np = videos_np[0]  # (T, H, W, C)
+
+            if _vram.enabled:
+                _pipeline.evaluator.sr_model.to(torch.device("cpu"))
+                _vram.mark_offloaded("sr")
+                gc.collect()
+                torch.cuda.empty_cache()
+
+    elapsed = time.time() - t0
+
+    output_frame = PILImage.fromarray(video_np[0])
+    output_dir = os.path.join(Path(__file__).resolve().parent, "output")
+    os.makedirs(output_dir, exist_ok=True)
+    timestamp = int(time.time())
+    out_path = os.path.join(output_dir, f"{timestamp}_{seed}_sr_img.png")
+    output_frame.save(out_path)
+
+    progress(1.0, desc="Complete")
+
+    lines = [
+        f"Total: {elapsed:.1f}s  |  Seed: {seed}",
+        f"Input: {input_w}x{input_h}  →  SR: {sr_width}x{sr_height}",
+        f"SR: {sr_tier} model → {up_res_choice}  |  Steps: {sr_steps}  |  Guidance: {sr_guidance}",
+        f"Output: {os.path.basename(out_path)}",
+    ]
+
+    return out_path, "\n".join(lines), seed
+
+
+# ---------------------------------------------------------------------------
+# Standalone SR upscale (video)
 # ---------------------------------------------------------------------------
 
 
@@ -1458,6 +1806,115 @@ def build_ui():
                         )
                         up_seed_out = gr.Number(label="Seed Used", interactive=False)
 
+            # ==================================================================
+            # TAB 3 — Image Generation
+            # ==================================================================
+            with gr.TabItem("Image Generation"):
+                gr.Markdown(
+                    "Generate a single image using the video model (1-second generation, frame 0 extracted). "
+                    "Supports T2I and I2I with optional SR upscaling."
+                )
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        img_mode = gr.Radio(
+                            choices=["Text to Image", "Image to Image"],
+                            value="Text to Image",
+                            label="Mode",
+                        )
+                        img_ref = gr.Image(label="Reference Image (I2I)", type="filepath", visible=False)
+                        img_raw_prompt = gr.Textbox(label="Prompt", lines=3, placeholder="A portrait of...")
+                        with gr.Row():
+                            img_enhanced_prompt = gr.Textbox(label="Enhanced Prompt", lines=3, interactive=True)
+                            img_use_enhanced = gr.Checkbox(label="Use enhanced", value=True)
+                        with gr.Row():
+                            img_seed = gr.Number(label="Seed", value=42, precision=0)
+                            img_randomize = gr.Checkbox(label="Randomize", value=True)
+
+                        with gr.Group():
+                            gr.Markdown("### Resolution")
+                            img_aspect = gr.Dropdown(
+                                choices=list(IMAGE_ASPECT_PRESETS.keys()),
+                                value="1:1 Square",
+                                label="Aspect Ratio",
+                            )
+                            img_mp = gr.Slider(
+                                minimum=0.05, maximum=0.5, value=0.11, step=0.01,
+                                label="Target Megapixels (base generation)",
+                            )
+                            img_res_mult = gr.Slider(
+                                minimum=1.0, maximum=2.0, value=1.0, step=0.5,
+                                label="Resolution Multiplier (experimental)",
+                            )
+
+                        with gr.Group():
+                            gr.Markdown("### Super-Resolution")
+                            img_sr_model = gr.Dropdown(
+                                choices=["None", "540p model", "1080p model"],
+                                value="None",
+                                label="SR Model",
+                            )
+                            img_sr_res = gr.Dropdown(
+                                choices=list(SR_SHORT_PRESETS.keys()),
+                                value="540p",
+                                label="SR Output Resolution",
+                            )
+                            img_sr_steps = gr.Slider(minimum=1, maximum=10, value=5, step=1, label="SR Steps")
+                            img_sr_guidance = gr.Slider(minimum=1.0, maximum=10.0, value=3.5, step=0.5, label="SR Guidance")
+
+                        with gr.Accordion("Advanced", open=False):
+                            img_base_steps = gr.Slider(
+                                minimum=1, maximum=50, value=8 if _use_distill else 32, step=1, label="Inference Steps"
+                            )
+                            img_vid_guidance = gr.Slider(
+                                minimum=1.0, maximum=15.0, value=5.0, step=0.5, label="Guidance Scale"
+                            )
+
+                        img_gen_btn = gr.Button("Generate Image", variant="primary", size="lg")
+
+                    with gr.Column(scale=1):
+                        img_output = gr.Image(label="Generated Image")
+                        img_status = gr.Textbox(label="Details", interactive=False, lines=6, max_lines=15)
+                        img_seed_out = gr.Number(label="Seed Used", interactive=False)
+
+            # ==================================================================
+            # TAB 4 — Image Upscale
+            # ==================================================================
+            with gr.TabItem("Upscale Image"):
+                gr.Markdown(
+                    "Upload an image and run the SR model to upscale it. "
+                    "The image is encoded as a short repeated sequence, SR-processed, then frame 0 is extracted."
+                )
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        upi_image_in = gr.Image(label="Input Image", type="filepath")
+                        upi_prompt = gr.Textbox(
+                            label="Prompt (describes image for SR guidance)",
+                            placeholder="A detailed portrait...",
+                            lines=3,
+                        )
+                        upi_model_choice = gr.Dropdown(
+                            choices=["540p model", "1080p model"],
+                            value="540p model",
+                            label="SR Model",
+                        )
+                        upi_res_choice = gr.Dropdown(
+                            choices=list(SR_SHORT_PRESETS.keys()),
+                            value="540p",
+                            label="Output Resolution (short side)",
+                        )
+                        with gr.Row():
+                            upi_sr_steps = gr.Slider(minimum=1, maximum=10, value=5, step=1, label="SR Steps")
+                            upi_sr_guidance = gr.Slider(minimum=1.0, maximum=10.0, value=3.5, step=0.5, label="SR Guidance")
+                        with gr.Row():
+                            upi_seed = gr.Number(label="Seed", value=42, precision=0)
+                            upi_randomize = gr.Checkbox(label="Randomize", value=True)
+                        upi_btn = gr.Button("Upscale Image", variant="primary", size="lg")
+
+                    with gr.Column(scale=1):
+                        upi_image_out = gr.Image(label="Upscaled Image")
+                        upi_status = gr.Textbox(label="Upscale Details", interactive=False, lines=6, max_lines=15)
+                        upi_seed_out = gr.Number(label="Seed Used", interactive=False)
+
         # --- Event wiring: Generate tab ---
 
         def toggle_image_visibility(mode_value):
@@ -1521,6 +1978,7 @@ def build_ui():
                 sr_model_choice, sr_res_choice, sr_steps, sr_guidance,
                 base_steps, vid_guidance, aud_guidance,
                 preview_raw,
+                llm_api_base, llm_api_key, llm_model, llm_vision_model,
             ],
             outputs=[video_output, raw_video_output, status_output, seed_output],
             concurrency_limit=1,
@@ -1536,6 +1994,41 @@ def build_ui():
                 up_seed, up_randomize,
             ],
             outputs=[up_video_out, up_status, up_seed_out],
+            concurrency_limit=1,
+        )
+
+        # --- Event wiring: Image Generation tab ---
+
+        def _toggle_img_ref(mode_val):
+            return gr.update(visible=mode_val == "Image to Image")
+
+        img_mode.change(fn=_toggle_img_ref, inputs=[img_mode], outputs=[img_ref])
+
+        img_gen_btn.click(
+            fn=generate_image,
+            inputs=[
+                img_mode, img_raw_prompt, img_enhanced_prompt, img_use_enhanced,
+                img_ref,
+                img_seed, img_randomize,
+                img_aspect, img_mp, img_res_mult,
+                img_sr_model, img_sr_res, img_sr_steps, img_sr_guidance,
+                img_base_steps, img_vid_guidance,
+                llm_api_base, llm_api_key, llm_model, llm_vision_model,
+            ],
+            outputs=[img_output, img_status, img_seed_out],
+            concurrency_limit=1,
+        )
+
+        # --- Event wiring: Image Upscale tab ---
+
+        upi_btn.click(
+            fn=upscale_image,
+            inputs=[
+                upi_image_in, upi_prompt, upi_model_choice, upi_res_choice,
+                upi_sr_steps, upi_sr_guidance,
+                upi_seed, upi_randomize,
+            ],
+            outputs=[upi_image_out, upi_status, upi_seed_out],
             concurrency_limit=1,
         )
 
