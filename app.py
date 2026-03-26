@@ -1243,6 +1243,7 @@ def upscale_image(
     sr_guidance: float,
     seed: int,
     randomize_seed: bool,
+    pre_resize: bool = True,
     progress=gr.Progress(),
 ):
     """Upscale a single image by encoding it as a short repeated video, running SR, extracting frame 0."""
@@ -1273,6 +1274,17 @@ def upscale_image(
 
     progress(0.0, desc="Loading image…")
     img = PILImage.open(input_image).convert("RGB")
+    orig_w, orig_h = img.size
+
+    if pre_resize:
+        ratio = orig_w / orig_h
+        rh = (TARGET_PIXELS_BASE / ratio) ** 0.5
+        rw = rh * ratio
+        rw, rh = _snap(int(rw)), _snap(int(rh))
+        if rw != orig_w or rh != orig_h:
+            img = img.resize((rw, rh), PILImage.LANCZOS)
+            print(f"  [sr] Pre-resized input: {orig_w}×{orig_h} → {rw}×{rh} (~{TARGET_PIXELS_BASE//1000}k px)")
+
     img_np = np.array(img)  # (H, W, C)
     input_h, input_w = img_np.shape[:2]
 
@@ -1412,6 +1424,7 @@ def upscale_video(
     sr_guidance: float,
     seed: int,
     randomize_seed: bool,
+    pre_resize: bool = True,
     progress=gr.Progress(),
 ):
     """Encode an external video through the VAE, run SR, decode back."""
@@ -1444,6 +1457,21 @@ def upscale_video(
 
     frames = iio.imread(input_video, plugin="pyav")  # (T, H, W, C) uint8
     num_frames = frames.shape[0]
+    orig_h, orig_w = frames.shape[1], frames.shape[2]
+
+    if pre_resize:
+        ratio = orig_w / orig_h
+        target_h = (TARGET_PIXELS_BASE / ratio) ** 0.5
+        target_w = target_h * ratio
+        target_w, target_h = _snap(int(target_w)), _snap(int(target_h))
+        if target_w != orig_w or target_h != orig_h:
+            from PIL import Image as PILImage
+            resized = []
+            for f in frames:
+                resized.append(np.array(PILImage.fromarray(f).resize((target_w, target_h), PILImage.LANCZOS)))
+            frames = np.stack(resized)
+            print(f"  [sr] Pre-resized input: {orig_w}×{orig_h} → {target_w}×{target_h} (~{TARGET_PIXELS_BASE//1000}k px)")
+
     input_h, input_w = frames.shape[1], frames.shape[2]
 
     progress(0.02, desc=f"Ensuring SR model ({sr_tier})...")
@@ -1597,7 +1625,8 @@ def upscale_video(
         )
         os.unlink(tmp_video)
     else:
-        os.rename(tmp_video, out_path)
+        import shutil
+        shutil.move(tmp_video, out_path)
 
     progress(1.0, desc="Complete")
 
@@ -1838,6 +1867,10 @@ def build_ui():
                         with gr.Row():
                             up_seed = gr.Number(label="Seed", value=42, precision=0)
                             up_randomize = gr.Checkbox(label="Randomize", value=True)
+                        up_pre_resize = gr.Checkbox(
+                            label="Pre-resize input to ~0.11 MP (model native resolution)",
+                            value=True,
+                        )
                         up_btn = gr.Button("Upscale", variant="primary", size="lg")
 
                     with gr.Column(scale=1):
@@ -1952,6 +1985,10 @@ def build_ui():
                         with gr.Row():
                             upi_seed = gr.Number(label="Seed", value=42, precision=0)
                             upi_randomize = gr.Checkbox(label="Randomize", value=True)
+                        upi_pre_resize = gr.Checkbox(
+                            label="Pre-resize input to ~0.11 MP (model native resolution)",
+                            value=True,
+                        )
                         upi_btn = gr.Button("Upscale Image", variant="primary", size="lg")
 
                     with gr.Column(scale=1):
@@ -2050,7 +2087,7 @@ def build_ui():
             inputs=[
                 up_video_in, up_prompt, up_model_choice, up_res_choice,
                 up_sr_steps, up_sr_guidance,
-                up_seed, up_randomize,
+                up_seed, up_randomize, up_pre_resize,
             ],
             outputs=[up_video_out, up_status, up_seed_out],
             concurrency_limit=1,
@@ -2085,7 +2122,7 @@ def build_ui():
             inputs=[
                 upi_image_in, upi_prompt, upi_model_choice, upi_res_choice,
                 upi_sr_steps, upi_sr_guidance,
-                upi_seed, upi_randomize,
+                upi_seed, upi_randomize, upi_pre_resize,
             ],
             outputs=[upi_image_out, upi_status, upi_seed_out],
             concurrency_limit=1,
