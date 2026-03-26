@@ -139,6 +139,12 @@ SR_SHORT_SIDE = {
     "1080p": 1088,
 }
 
+SR_SHORT_PRESETS = {
+    "540p": 512,
+    "720p": 736,
+    "1080p": 1088,
+}
+
 ALIGNMENT = 32  # vae_stride(16) * patch_size(2)
 
 
@@ -147,12 +153,11 @@ def _snap(val: int, alignment: int = ALIGNMENT) -> int:
     return max(alignment, round(val / alignment) * alignment)
 
 
-def _sr_dims_for(base_w: int, base_h: int, sr_tier: str):
+def _sr_dims_for(base_w: int, base_h: int, target_short: int):
     """Compute SR output dimensions that preserve the base aspect ratio.
 
-    Scales so the short side matches the tier target, snapped to ALIGNMENT.
+    Scales so the short side matches target_short, snapped to ALIGNMENT.
     """
-    target_short = SR_SHORT_SIDE[sr_tier]
     short = min(base_w, base_h)
     if short <= 0:
         short = 1
@@ -830,7 +835,8 @@ def generate(
     seconds: int,
     base_res: str,
     res_multiplier: float,
-    sr_choice: str,
+    sr_model_choice: str,
+    sr_res_choice: str,
     sr_steps: int,
     sr_guidance: float,
     base_steps: int,
@@ -880,16 +886,17 @@ def generate(
         br_height = _snap(int(br_height * res_multiplier))
 
     # --- Lazy SR model management ---
-    sr_tier_map = {"540p": "540p", "1080p": "1080p"}
-    sr_tier = sr_tier_map.get(sr_choice)
+    sr_model_map = {"540p model": "540p", "1080p model": "1080p"}
+    sr_tier = sr_model_map.get(sr_model_choice)
     sr_width, sr_height = None, None
     use_sr = sr_tier is not None
 
     if use_sr:
         progress(0.0, desc=f"Checking SR model ({sr_tier})...")
         _ensure_sr_model(sr_tier)
-        sr_width, sr_height = _sr_dims_for(br_width, br_height, sr_tier)
-        print(f"  [sr] SR output: {sr_width}×{sr_height} (preserving {br_width}×{br_height} aspect ratio)")
+        target_short = SR_SHORT_PRESETS.get(sr_res_choice, 512)
+        sr_width, sr_height = _sr_dims_for(br_width, br_height, target_short)
+        print(f"  [sr] SR output: {sr_width}×{sr_height} ({sr_res_choice}, preserving {br_width}×{br_height} aspect ratio)")
 
     _pipeline.evaluation_config.num_inference_steps = base_steps
     _pipeline.evaluation_config.video_txt_guidance_scale = vid_guidance
@@ -977,7 +984,7 @@ def generate(
     lines.append(f"Base: {br_width}x{br_height}{mult_tag}  |  Duration: {seconds}s  |  Steps: {base_steps}")
     lines.append(f"Guidance — Video: {vid_guidance}  Audio: {aud_guidance}")
     if sr_width:
-        lines.append(f"SR: {sr_tier} ({sr_width}x{sr_height})  |  SR Steps: {sr_steps}  |  SR Guidance: {sr_guidance}")
+        lines.append(f"SR: {sr_tier} model → {sr_res_choice} ({sr_width}x{sr_height})  |  SR Steps: {sr_steps}  |  SR Guidance: {sr_guidance}")
     else:
         lines.append("SR: off")
     if raw_video_path:
@@ -1009,7 +1016,8 @@ def generate(
 def upscale_video(
     input_video: str,
     prompt: str,
-    sr_tier_choice: str,
+    up_model_choice: str,
+    up_res_choice: str,
     sr_steps: int,
     sr_guidance: float,
     seed: int,
@@ -1030,10 +1038,10 @@ def upscale_video(
     if not input_video:
         raise gr.Error("Upload a video to upscale.")
 
-    sr_tier_map = {"540p": "540p", "1080p": "1080p"}
-    sr_tier = sr_tier_map.get(sr_tier_choice)
+    sr_model_map = {"540p model": "540p", "1080p model": "1080p"}
+    sr_tier = sr_model_map.get(up_model_choice)
     if sr_tier is None:
-        raise gr.Error("Select an SR resolution (540p or 1080p).")
+        raise gr.Error("Select an SR model (540p or 1080p).")
 
     if not prompt or not prompt.strip():
         raise gr.Error("A text prompt is required — the SR model is text-guided.")
@@ -1051,7 +1059,8 @@ def upscale_video(
     progress(0.02, desc=f"Ensuring SR model ({sr_tier})...")
     _ensure_sr_model(sr_tier)
 
-    sr_width, sr_height = _sr_dims_for(input_w, input_h, sr_tier)
+    target_short = SR_SHORT_PRESETS.get(up_res_choice, 512)
+    sr_width, sr_height = _sr_dims_for(input_w, input_h, target_short)
     print(f"  [sr] Upscale SR output: {sr_width}×{sr_height} "
           f"(preserving {input_w}×{input_h} aspect ratio)")
 
@@ -1205,7 +1214,7 @@ def upscale_video(
     lines = [
         f"Total: {elapsed:.1f}s  |  Seed: {seed}",
         f"Input: {input_w}x{input_h} ({num_frames} frames)  →  SR: {sr_width}x{sr_height}",
-        f"SR: {sr_tier}  |  Steps: {sr_steps}  |  Guidance: {sr_guidance}",
+        f"SR: {sr_tier} model → {up_res_choice} ({sr_width}x{sr_height})  |  Steps: {sr_steps}  |  Guidance: {sr_guidance}",
         f"Audio: {'carried forward' if has_audio else 'none in source'}",
         f"Output: {os.path.basename(out_path)}",
     ]
@@ -1346,10 +1355,15 @@ def build_ui():
 
                         with gr.Group():
                             gr.Markdown("### Super-Resolution")
-                            sr_choice = gr.Dropdown(
-                                choices=["None", "540p", "1080p"],
+                            sr_model_choice = gr.Dropdown(
+                                choices=["None", "540p model", "1080p model"],
                                 value="None",
-                                label="Super-Resolution Upscale (preserves aspect ratio)",
+                                label="SR Model",
+                            )
+                            sr_res_choice = gr.Dropdown(
+                                choices=list(SR_SHORT_PRESETS.keys()),
+                                value="540p",
+                                label="SR Output Resolution (short side — aspect ratio preserved)",
                             )
                             sr_steps = gr.Slider(
                                 minimum=1, maximum=10, value=5, step=1,
@@ -1410,10 +1424,15 @@ def build_ui():
                             placeholder="A woman with dark hair speaking into a microphone...",
                             lines=3,
                         )
-                        up_sr_choice = gr.Dropdown(
-                            choices=["540p", "1080p"],
+                        up_model_choice = gr.Dropdown(
+                            choices=["540p model", "1080p model"],
+                            value="540p model",
+                            label="SR Model",
+                        )
+                        up_res_choice = gr.Dropdown(
+                            choices=list(SR_SHORT_PRESETS.keys()),
                             value="540p",
-                            label="Target Resolution (preserves aspect ratio)",
+                            label="Output Resolution (short side — aspect ratio preserved)",
                         )
                         with gr.Row():
                             up_sr_steps = gr.Slider(
@@ -1499,7 +1518,7 @@ def build_ui():
                 mode, raw_prompt, enhanced_prompt, use_enhanced,
                 image, audio,
                 seed, randomize_seed, seconds, base_res, res_multiplier,
-                sr_choice, sr_steps, sr_guidance,
+                sr_model_choice, sr_res_choice, sr_steps, sr_guidance,
                 base_steps, vid_guidance, aud_guidance,
                 preview_raw,
             ],
@@ -1512,7 +1531,7 @@ def build_ui():
         up_btn.click(
             fn=upscale_video,
             inputs=[
-                up_video_in, up_prompt, up_sr_choice,
+                up_video_in, up_prompt, up_model_choice, up_res_choice,
                 up_sr_steps, up_sr_guidance,
                 up_seed, up_randomize,
             ],
