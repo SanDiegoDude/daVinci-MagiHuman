@@ -35,10 +35,22 @@ _ENV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
 _SYSTEM_PROMPT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "prompt_system.txt")
 
 
+_ENV_DEFAULTS = {
+    "LLM_API_BASE_URL": "http://localhost:1234/v1",
+    "LLM_API_KEY": "lm-studio",
+    "LLM_MODEL": "default",
+    "LLM_VISION_MODEL": "",
+}
+
+
 def _load_dotenv():
-    """Minimal .env loader — no external dependency needed."""
+    """Minimal .env loader — no external dependency needed.
+
+    Creates a default .env with sensible values if one doesn't exist.
+    """
     if not os.path.exists(_ENV_PATH):
-        return
+        _save_dotenv(**_ENV_DEFAULTS)
+        print(f"  [env] Created default .env at {_ENV_PATH}")
     with open(_ENV_PATH) as f:
         for line in f:
             line = line.strip()
@@ -46,6 +58,28 @@ def _load_dotenv():
                 continue
             key, _, value = line.partition("=")
             os.environ.setdefault(key.strip(), value.strip())
+
+
+def _save_dotenv(
+    LLM_API_BASE_URL: str = "",
+    LLM_API_KEY: str = "",
+    LLM_MODEL: str = "",
+    LLM_VISION_MODEL: str = "",
+):
+    """Write current LLM settings back to .env."""
+    content = (
+        "# OAI-compatible endpoint for prompt enhancement\n"
+        "# Point this at LM Studio, OpenAI, or any compatible API\n"
+        f"LLM_API_BASE_URL={LLM_API_BASE_URL}\n"
+        f"LLM_API_KEY={LLM_API_KEY}\n"
+        f"LLM_MODEL={LLM_MODEL}\n"
+        "\n"
+        "# For vision-capable model (used in I2V mode to analyze reference image)\n"
+        "# Leave blank to use the same model as above\n"
+        f"LLM_VISION_MODEL={LLM_VISION_MODEL}\n"
+    )
+    with open(_ENV_PATH, "w") as f:
+        f.write(content)
 
 
 _load_dotenv()
@@ -1674,6 +1708,8 @@ def build_ui():
                                     f"System prompt loaded from:\n`{_SYSTEM_PROMPT_PATH}`\n\n"
                                     "Edit the file and click reload to pick up changes."
                                 )
+                                save_env_btn = gr.Button("Save LLM Settings to .env", size="sm")
+                                save_env_status = gr.Textbox(visible=False, interactive=False, max_lines=1)
                                 reload_sp_btn = gr.Button("Reload System Prompt", size="sm")
                                 system_prompt_preview = gr.Textbox(
                                     label="Current System Prompt (preview)",
@@ -1973,6 +2009,21 @@ def build_ui():
             return preview
 
         reload_sp_btn.click(fn=_reload_sp, outputs=[system_prompt_preview])
+
+        def _save_env(api_base, api_key, model_name, vision_model):
+            _save_dotenv(
+                LLM_API_BASE_URL=api_base,
+                LLM_API_KEY=api_key,
+                LLM_MODEL=model_name,
+                LLM_VISION_MODEL=vision_model,
+            )
+            return gr.update(value=f"Saved to {_ENV_PATH}", visible=True)
+
+        save_env_btn.click(
+            fn=_save_env,
+            inputs=[llm_api_base, llm_api_key, llm_model, llm_vision_model],
+            outputs=[save_env_status],
+        )
 
         generate_btn.click(
             fn=generate,
