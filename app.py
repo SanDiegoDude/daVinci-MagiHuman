@@ -829,6 +829,7 @@ def generate(
     randomize_seed: bool,
     seconds: int,
     base_res: str,
+    res_multiplier: float,
     sr_choice: str,
     sr_steps: int,
     sr_guidance: float,
@@ -873,6 +874,10 @@ def generate(
             br_width, br_height = 448, 256
     else:
         br_width, br_height = preset
+
+    if res_multiplier and res_multiplier > 1.0:
+        br_width = _snap(int(br_width * res_multiplier))
+        br_height = _snap(int(br_height * res_multiplier))
 
     # --- Lazy SR model management ---
     sr_tier_map = {"540p": "540p", "1080p": "1080p"}
@@ -968,7 +973,8 @@ def generate(
     lines = []
     lines.append(f"Total: {elapsed:.1f}s  |  Seed: {seed}")
     lines.append(f"Mode: {mode}  |  Prompt source: {'enhanced' if used_enhanced else 'raw'}")
-    lines.append(f"Base: {br_width}x{br_height}  |  Duration: {seconds}s  |  Steps: {base_steps}")
+    mult_tag = f" ({res_multiplier}x)" if res_multiplier and res_multiplier > 1.0 else ""
+    lines.append(f"Base: {br_width}x{br_height}{mult_tag}  |  Duration: {seconds}s  |  Steps: {base_steps}")
     lines.append(f"Guidance — Video: {vid_guidance}  Audio: {aud_guidance}")
     if sr_width:
         lines.append(f"SR: {sr_tier} ({sr_width}x{sr_height})  |  SR Steps: {sr_steps}  |  SR Guidance: {sr_guidance}")
@@ -1327,6 +1333,10 @@ def build_ui():
                                 value="Auto (match image)",
                                 label="Base Resolution",
                             )
+                            res_multiplier = gr.Slider(
+                                minimum=1.0, maximum=2.0, value=1.0, step=0.5,
+                                label="Resolution Multiplier (experimental — higher = more detail but untested territory)",
+                            )
                             auto_res_info = gr.Textbox(
                                 label="Auto Resolution",
                                 value="Will match uploaded image aspect ratio (default 448x256 for T2V)",
@@ -1440,33 +1450,35 @@ def build_ui():
             outputs=[image],
         )
 
-        def _update_auto_res(image_path, res_choice):
-            if res_choice != "Auto (match image)":
-                return gr.update(visible=False)
-            if image_path is None:
-                return gr.update(
-                    value="No image uploaded — will use 448x256 default",
-                    visible=True,
-                )
-            w, h = _auto_resolution_from_image(image_path)
-            from PIL import Image as PILImage
-            with PILImage.open(image_path) as img:
-                iw, ih = img.size
+        def _update_auto_res(image_path, res_choice, mult):
+            preset = BASE_RESOLUTION_PRESETS.get(res_choice)
+            if preset is None:
+                if image_path is None:
+                    w, h = 448, 256
+                    label = "default (no image)"
+                else:
+                    w, h = _auto_resolution_from_image(image_path)
+                    from PIL import Image as PILImage
+                    with PILImage.open(image_path) as img:
+                        iw, ih = img.size
+                    label = f"from {iw}x{ih} input"
+            else:
+                w, h = preset
+                label = "preset"
+            if mult and mult > 1.0:
+                w, h = _snap(int(w * mult)), _snap(int(h * mult))
+            pixels = w * h
             return gr.update(
-                value=f"Input: {iw}x{ih} → Base: {w}x{h} (aspect-matched, {w*h//1000}k pixels)",
+                value=f"Base: {w}x{h} ({label}, {pixels // 1000}k pixels{f', {mult}x' if mult > 1.0 else ''})",
                 visible=True,
             )
 
-        image.change(
-            fn=_update_auto_res,
-            inputs=[image, base_res],
-            outputs=[auto_res_info],
-        )
-        base_res.change(
-            fn=_update_auto_res,
-            inputs=[image, base_res],
-            outputs=[auto_res_info],
-        )
+        for trigger in [image, base_res, res_multiplier]:
+            trigger.change(
+                fn=_update_auto_res,
+                inputs=[image, base_res, res_multiplier],
+                outputs=[auto_res_info],
+            )
 
         enhance_btn.click(
             fn=_do_enhance,
@@ -1486,7 +1498,7 @@ def build_ui():
             inputs=[
                 mode, raw_prompt, enhanced_prompt, use_enhanced,
                 image, audio,
-                seed, randomize_seed, seconds, base_res,
+                seed, randomize_seed, seconds, base_res, res_multiplier,
                 sr_choice, sr_steps, sr_guidance,
                 base_steps, vid_guidance, aud_guidance,
                 preview_raw,
