@@ -10,6 +10,7 @@ einops
 safetensors
 scipy
 numpy
+magi_compiler @ git+https://github.com/SandAI-org/MagiCompiler.git
 
 # --- Original upstream deps ---
 accelerate==1.10.1
